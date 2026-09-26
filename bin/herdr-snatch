@@ -1,0 +1,213 @@
+#!/usr/bin/env python3
+"""Pick text from Herdr pane output to insert, copy, or open."""
+
+import argparse
+import concurrent.futures
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+
+SCROLLBACK_LINES = 10_000_000
+SCOPES = ("pane", "tab", "workspace")
+SOURCES = ("visible", "scrollback")
+URL = re.compile(r"(?:https?|ftp|file)://[^\s<>\"']+")
+PATH = re.compile(r"(?<![\w:/])(?:~?/|\.{1,2}/)?[\w.+@~-]+(?:/[\w.+@~-]+)+")
+HASH = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{7,40}(?![0-9a-fA-F])")
+WORD = re.compile(r"[^\s\[\](){}<>'\"|,;]+")
+TRAILING = ".,;:!?)]}>\"'"
+
+
+def candidates(scrollback):
+    """Keep the newest occurrence of each candidate first."""
+    seen = set()
+    for raw_line in reversed(scrollback.splitlines()):
+        line = "".join(char if char.isprintable() else " " for char in raw_line).strip()
+        if not line:
+            continue
+        for pattern in (URL, PATH, HASH, WORD):
+            for match in pattern.finditer(line):
+                value = match.group().strip(TRAILING)
+                if value and value not in seen:
+                    seen.add(value)
+                    yield value
+        if line not in seen:
+            seen.add(line)
+            yield line
+
+
+def choices(herdr, pane_id, tab_id, workspace_id, scope, source):
+    pane_ids = [pane_id]
+    if scope != "pane":
+        panes = json.loads(subprocess.run(
+            [herdr, "pane", "list", "--workspace", workspace_id],
+            check=True, capture_output=True, text=True,
+        ).stdout)["result"]["panes"]
+        pane_ids.extend(
+            pane["pane_id"] for pane in panes
+            if pane["pane_id"] != pane_id and (scope == "workspace" or pane["tab_id"] == tab_id)
+        )
+
+    def read(pane):
+        command = [herdr, "pane", "read", pane, "--source", "visible" if source == "visible" else "recent-unwrapped"]
+        if source == "scrollback":
+            command.extend(("--lines", str(SCROLLBACK_LINES)))
+        return subprocess.run(command, check=True, capture_output=True, text=True, errors="replace").stdout
+
+    seen = set()
+    with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(pane_ids))) as pool:
+        for output in pool.map(read, pane_ids):
+            for candidate in candidates(output):
+                if candidate not in seen:
+                    seen.add(candidate)
+                    yield candidate
+
+
+def header(scope, source):
+    return f"{scope}/{source} | ^P/^T/^W scope ^V/^R source ^Y copy ^O open"
+
+
+def default_search():
+    scope, source = "tab", "visible"
+    config_dir = os.environ.get("HERDR_PLUGIN_CONFIG_DIR")
+    if config_dir:
+        config_file = Path(config_dir) / "settings.json"
+        if config_file.exists():
+            settings = json.loads(config_file.read_text())
+            scope = settings.get("scope", scope)
+            source = settings.get("source", source)
+    if scope not in SCOPES or source not in SOURCES:
+        sys.exit("herdr-snatch: invalid scope or source in settings.json")
+    return scope, source
+
+
+def copy_to_clipboard(value):
+    if os.environ.get("WAYLAND_DISPLAY") and shutil.which("wl-copy"):
+        command = ["wl-copy"]
+    elif os.environ.get("DISPLAY") and shutil.which("xclip"):
+        command = ["xclip", "-selection", "clipboard"]
+    elif shutil.which("pbcopy"):
+        command = ["pbcopy"]
+    else:
+        sys.exit("herdr-snatch: install wl-copy, xclip, or pbcopy to copy text")
+    subprocess.run(command, input=value, text=True, check=True)
+
+
+def open_target(value, pane_id=None, herdr="herdr"):
+    if URL.fullmatch(value):
+        target = value
+    else:
+        path = Path(value).expanduser()
+        if not path.is_absolute():
+            cwd = os.environ.get("HERDR_ACTIVE_PANE_CWD")
+            if not cwd and pane_id:
+                pane = json.loads(subprocess.run(
+                    [herdr, "pane", "get", pane_id], check=True, capture_output=True, text=True,
+                ).stdout)["result"]["pane"]
+                cwd = pane.get("foreground_cwd") or pane["cwd"]
+            path = Path(cwd or os.getcwd()) / path
+        if not path.exists():
+            sys.exit(f"herdr-snatch: file does not exist: {value}")
+        target = str(path.resolve())
+
+    opener = "open" if sys.platform == "darwin" else "xdg-open"
+    if not shutil.which(opener):
+        sys.exit(f"herdr-snatch: {opener} is required to open a selection")
+    subprocess.Popen([opener, target], stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True)
+
+
+def main(argv=None):
+    argv = sys.argv[1:] if argv is None else argv
+    parser = argparse.ArgumentParser(description=__doc__)
+    default_scope, default_source = default_search()
+    parser.add_argument("--scope", choices=SCOPES, default=default_scope)
+    parser.add_argument("--source", choices=SOURCES, default=default_source)
+
+    if argv[:1] == ["--switch"]:
+        if len(argv) != 4:
+            parser.error("invalid switch arguments")
+        state = Path(argv[1])
+        scope, source = state.read_text().split()
+        kind, value = argv[2:4]
+        if kind == "scope" and value in SCOPES:
+            scope = value
+        elif kind == "source" and value in SOURCES:
+            source = value
+        else:
+            parser.error("invalid switch mode")
+        replacement = state.with_suffix(".new")
+        replacement.write_text(f"{scope} {source}")
+        replacement.replace(state)
+        script = shlex.quote(str(Path(__file__).resolve()))
+        print(f"reload({script} --list {shlex.quote(str(state))})")
+        return
+
+    args = parser.parse_args(argv) if argv[:1] != ["--list"] else None
+
+    pane_id = os.environ.get("HERDR_ACTIVE_PANE_ID")
+    if not pane_id:
+        sys.exit("herdr-snatch: no originating pane (HERDR_ACTIVE_PANE_ID)")
+    herdr = os.environ.get("HERDR_BIN_PATH", "herdr")
+    tab_id = os.environ.get("HERDR_ACTIVE_TAB_ID")
+    workspace_id = os.environ.get("HERDR_ACTIVE_WORKSPACE_ID")
+
+    if args is None:
+        if len(argv) != 2:
+            parser.error("invalid list arguments")
+        state = Path(argv[1])
+        scope, source = state.read_text().split()
+        print(header(scope, source))
+        items = list(choices(herdr, pane_id, tab_id, workspace_id, scope, source))
+        if items:
+            print("\n".join(items))
+        return
+
+    if not tab_id or not workspace_id:
+        sys.exit("herdr-snatch: missing tab or workspace context")
+    if not shutil.which("fzf"):
+        print("fzf is required. Install it, then press Enter to close.", flush=True)
+        sys.stdin.readline()
+        return
+
+    initial = "\n".join(choices(herdr, pane_id, tab_id, workspace_id, args.scope, args.source))
+    with tempfile.TemporaryDirectory(prefix="herdr-snatch-") as directory:
+        state = Path(directory) / "mode"
+        state.write_text(f"{args.scope} {args.source}")
+        script = shlex.quote(str(Path(__file__).resolve()))
+        state_arg = shlex.quote(str(state))
+        bindings = ["tab:accept"]
+        for key, kind, value in (("ctrl-p", "scope", "pane"), ("ctrl-t", "scope", "tab"),
+                                 ("ctrl-w", "scope", "workspace"), ("ctrl-v", "source", "visible"),
+                                 ("ctrl-r", "source", "scrollback")):
+            bindings.append(f"{key}:transform({script} --switch {state_arg} {kind} {value})")
+
+        picker = subprocess.run(
+            ["fzf", "--layout=reverse", "--info=hidden", "--no-separator", "--no-scrollbar",
+             "--no-multi", "--tiebreak=index", "--prompt=> ", "--header-lines=1", "--expect=ctrl-y,ctrl-o",
+             *("--bind=" + binding for binding in bindings)],
+            input=header(args.scope, args.source) + "\n" + initial + "\n", stdout=subprocess.PIPE, text=True,
+            env={**os.environ, "FZF_DEFAULT_OPTS": ""},
+        )
+    if picker.returncode == 130 or picker.returncode == 1:
+        return
+    picker.check_returncode()
+    action, _, selected = picker.stdout.partition("\n")
+    selected = selected.removesuffix("\n")
+    if selected:
+        if action == "ctrl-y":
+            copy_to_clipboard(selected)
+        elif action == "ctrl-o":
+            open_target(selected, pane_id, herdr)
+        else:
+            subprocess.run([herdr, "pane", "send-text", pane_id, selected], check=True, stdout=subprocess.DEVNULL)
+
+
+if __name__ == "__main__":
+    main()

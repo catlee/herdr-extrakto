@@ -1,0 +1,8 @@
+#!/bin/sh
+set -eu
+
+exec "${HERDR_BIN_PATH:-herdr}" plugin pane open \
+  --plugin "$HERDR_PLUGIN_ID" --entrypoint picker \
+  --env "HERDR_ACTIVE_PANE_ID=$HERDR_PANE_ID" \
+  --env "HERDR_ACTIVE_TAB_ID=$HERDR_TAB_ID" \
+  --env "HERDR_ACTIVE_WORKSPACE_ID=$HERDR_WORKSPACE_ID"

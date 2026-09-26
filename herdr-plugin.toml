@@ -1,0 +1,20 @@
+id = "herdr-snatch"
+name = "Snatch"
+version = "0.1.0"
+min_herdr_version = "0.8.2"
+description = "Pick text from Herdr panes to insert, copy, or open"
+platforms = ["linux", "macos"]
+
+[[actions]]
+id = "open"
+title = "Pick text from pane output"
+contexts = ["global"]
+command = ["sh", "bin/open-popup"]
+
+[[panes]]
+id = "picker"
+title = "Snatch"
+placement = "popup"
+width = 72
+height = 12
+command = ["python3", "bin/herdr-snatch"]
