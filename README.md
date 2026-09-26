@@ -8,6 +8,8 @@
 
 > The path is right there. Why am I typing it again?
 
+![Snatch filters terminal output for pars and inserts src/foo/parser.rs at the shell prompt](demo/snatch.gif)
+
 ## Why herdr-snatch?
 
 Mouse selection across split panes works, but I kept grabbing one slash too many. [tmux-extrakto](https://github.com/laktak/extrakto) gave me the idea: put an `fzf` picker over Herdr and send the selection back to the pane that opened it.
@@ -48,8 +50,6 @@ prefix+Tab  →  type pars  →  Enter
 
 $ vim src/parser/rules.rs█
 ```
-
-[Watch the scripted demo](demo/snatch.mp4). It records a disposable Herdr session, including the real popup and insertion. No live panes were harmed.
 
 ## Keys
 

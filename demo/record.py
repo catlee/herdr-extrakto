@@ -76,6 +76,7 @@ def render(screen, font):
 def main():
     root = Path(__file__).resolve().parents[1]
     output = root / "demo" / "snatch.mp4"
+    preview = root / "demo" / "snatch.gif"
     session = "snatch-demo-" + secrets.token_hex(4)
     master, slave = pty.openpty()
     fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", ROWS, COLS, 0, 0))
@@ -121,7 +122,7 @@ def main():
             cli(session, "pane", "run", pane,
                 "export PS1='$ '; clear; printf 'Compiling demo...\\nerror: src/foo/parser.rs\\nsee https://example.com/issues/123\\ncommit abc123def456\\n'")
             pump(0.6)
-            cli(session, "pane", "send-text", pane, "vim ")
+            os.write(master, b"vim ")
             hold(0.9)
 
             os.write(master, b"\x00")  # Ctrl+Space, Herdr's configured prefix.
@@ -153,7 +154,14 @@ def main():
                     "-i", str(Path(image_dir) / "%04d.png"), "-c:v", "libx264", "-pix_fmt", "yuv420p",
                     "-movflags", "+faststart", str(output),
                 ], check=True)
-            print(output)
+            subprocess.run([
+                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", str(output),
+                "-filter_complex", "fps=8,scale=960:-1:flags=lanczos,split[a][b];"
+                "[a]palettegen=max_colors=64:stats_mode=diff[p];"
+                "[b][p]paletteuse=dither=bayer:bayer_scale=5",
+                str(preview),
+            ], check=True)
+            print(output, preview, sep="\n")
         finally:
             client.terminate()
             try:
