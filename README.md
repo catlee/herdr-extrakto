@@ -49,6 +49,8 @@ prefix+Tab  →  type pars  →  Enter
 $ vim src/parser/rules.rs█
 ```
 
+[Watch the scripted demo](demo/snatch.mp4). It records a disposable Herdr session, including the real popup and insertion. No live panes were harmed.
+
 ## Keys
 
 | Key | What it does |
@@ -91,3 +93,9 @@ python3 -m unittest discover -s tests -v
 ```
 
 CI runs the same tests on Python 3.9 and 3.14. The code is under the [MIT license](LICENSE).
+
+To rebuild the demo on Linux, install `ffmpeg` and `uv`, then run:
+
+```sh
+uv run --with pyte --with pillow python demo/record.py
+```
