@@ -33,6 +33,10 @@ class SnatchTests(unittest.TestCase):
         self.assertIn("new src/foo/parser.rs https://example.com/issues/123 abc123def456", values)
         self.assertLess(values.index("src/foo/parser.rs"), values.index("old-only"))
 
+    def test_candidates_join_words_wrapped_across_rows(self):
+        values = list(snatch.candidates("an unusuallylongwo\nrd split across rows\n"))
+        self.assertIn("unusuallylongword", values)
+
     @patch.dict("os.environ", {"HERDR_ACTIVE_PANE_ID": "w2:p3", "HERDR_ACTIVE_TAB_ID": "w2:t1",
                             "HERDR_ACTIVE_WORKSPACE_ID": "w2", "HERDR_BIN_PATH": "/bin/herdr"})
     @patch.object(snatch.subprocess, "run")

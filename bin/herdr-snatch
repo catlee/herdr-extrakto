@@ -27,19 +27,28 @@ TRAILING = ".,;:!?)]}>\"'"
 def candidates(scrollback):
     """Keep the newest occurrence of each candidate first."""
     seen = set()
-    for raw_line in reversed(scrollback.splitlines()):
-        line = "".join(char if char.isprintable() else " " for char in raw_line).strip()
+
+    def add_line(line, include_whole_line=True):
         if not line:
-            continue
+            return
         for pattern in (URL, PATH, HASH, WORD):
             for match in pattern.finditer(line):
                 value = match.group().strip(TRAILING)
                 if value and value not in seen:
                     seen.add(value)
                     yield value
-        if line not in seen:
+        if include_whole_line and line not in seen:
             seen.add(line)
             yield line
+
+    rows = ["".join(char if char.isprintable() else " " for char in raw_line).strip()
+            for raw_line in scrollback.splitlines()]
+    for index in range(len(rows) - 1, -1, -1):
+        yield from add_line(rows[index])
+        if index:
+            # Visible screen rows omit the wrap boundary; retain candidates
+            # formed by joining adjacent rows without adding a space.
+            yield from add_line(rows[index - 1] + rows[index], include_whole_line=False)
 
 
 def choices(herdr, pane_id, tab_id, workspace_id, scope, source):
