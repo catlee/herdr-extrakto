@@ -21,16 +21,27 @@ URL = re.compile(r"(?:https?|ftp|file)://[^\s<>\"']+")
 PATH = re.compile(r"(?<![\w:/])(?:~?/|\.{1,2}/)?[\w.+@~-]+(?:/[\w.+@~-]+)+")
 HASH = re.compile(r"(?<![0-9a-fA-F])[0-9a-fA-F]{7,40}(?![0-9a-fA-F])")
 WORD = re.compile(r"[^\s\[\](){}<>'\"|,;]+")
+# A word followed by a number, such as "PR #123" or "task 42". Only kept when an opener matches it.
+PREFIXED_NUMBER = re.compile(r"(?<![\w#-])[A-Za-z][\w-]*\s+#?\d+(?!\w)")
 TRAILING = ".,;:!?)]}>\"'"
+DEFAULT_OPENERS = (
+    {"name": "GitHub", "match": r"(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)#(?P<number>\d+)",
+     "url": "https://github.com/{owner}/{repo}/issues/{number}"},
+)
 
 
-def candidates(scrollback):
+def candidates(scrollback, openers=()):
     """Keep the newest occurrence of each candidate first."""
     seen = set()
 
     def add_line(line, include_whole_line=True):
         if not line:
             return
+        for match in PREFIXED_NUMBER.finditer(line):
+            value = match.group()
+            if value not in seen and matching_openers(value, openers):
+                seen.add(value)
+                yield value
         for pattern in (URL, PATH, HASH, WORD):
             for match in pattern.finditer(line):
                 value = match.group().strip(TRAILING)
@@ -69,10 +80,11 @@ def choices(herdr, pane_id, tab_id, workspace_id, scope, source):
             command.extend(("--lines", str(SCROLLBACK_LINES)))
         return subprocess.run(command, check=True, capture_output=True, text=True, errors="replace").stdout
 
+    openers = load_openers()
     seen = set()
     with concurrent.futures.ThreadPoolExecutor(max_workers=min(8, len(pane_ids))) as pool:
         for output in pool.map(read, pane_ids):
-            for candidate in candidates(output):
+            for candidate in candidates(output, openers):
                 if candidate not in seen:
                     seen.add(candidate)
                     yield candidate
@@ -82,18 +94,92 @@ def header(scope, source):
     return f"{scope}/{source} | ^P/^T/^W scope ^V/^R source ^Y copy ^O open"
 
 
-def default_search():
-    scope, source = "tab", "visible"
+def load_settings():
     config_dir = os.environ.get("HERDR_PLUGIN_CONFIG_DIR")
     if config_dir:
         config_file = Path(config_dir) / "settings.json"
         if config_file.exists():
-            settings = json.loads(config_file.read_text())
-            scope = settings.get("scope", scope)
-            source = settings.get("source", source)
+            return json.loads(config_file.read_text())
+    return {}
+
+
+def default_search():
+    settings = load_settings()
+    scope = settings.get("scope", "tab")
+    source = settings.get("source", "visible")
     if scope not in SCOPES or source not in SOURCES:
         sys.exit("herdr-snatch: invalid scope or source in settings.json")
     return scope, source
+
+
+def load_openers():
+    """Built-in openers, overridden by name or extended by settings.json "openers"."""
+    by_name = {opener["name"]: opener for opener in DEFAULT_OPENERS}
+    for opener in load_settings().get("openers", []):
+        by_name[opener["name"]] = opener
+    openers = []
+    for opener in by_name.values():
+        if ("url" in opener) == ("command" in opener) or "match" not in opener:
+            sys.exit(f"herdr-snatch: opener {opener['name']!r} needs match and exactly one of url or command")
+        openers.append({**opener, "pattern": re.compile(opener["match"])})
+    return openers
+
+
+def matching_openers(value, openers):
+    """Return (opener, fields) pairs, highest priority first; ties keep config order."""
+    matches = []
+    for opener in openers:
+        match = opener["pattern"].fullmatch(value)
+        if match:
+            fields = {**opener.get("defaults", {}),
+                      **{key: group for key, group in match.groupdict().items() if group is not None}}
+            matches.append((opener, fields))
+    return sorted(matches, key=lambda pair: -pair[0].get("priority", 0))
+
+
+def opener_target(opener, fields):
+    try:
+        if "url" in opener:
+            return opener["url"].format(**fields)
+        return [part.format(**fields) for part in opener["command"]]
+    except KeyError as error:
+        sys.exit(f"herdr-snatch: opener {opener['name']!r} has no value for {error}")
+
+
+def choose_opener(value, matches):
+    """Open directly when one opener outranks the rest; otherwise ask."""
+    if len(matches) == 1 or matches[0][0].get("priority", 0) > matches[1][0].get("priority", 0):
+        return matches[0]
+    lines = []
+    for index, (opener, fields) in enumerate(matches):
+        target = opener_target(opener, fields)
+        lines.append(f"{index}\t{opener['name']}\t{target if isinstance(target, str) else shlex.join(target)}")
+    picker = subprocess.run(
+        ["fzf", "--layout=reverse", "--info=hidden", "--no-separator", "--no-scrollbar", "--no-multi",
+         "--delimiter=\t", "--with-nth=2..", f"--header=Open {value} as", "--prompt=> "],
+        input="\n".join(lines) + "\n", stdout=subprocess.PIPE, text=True,
+        env={**os.environ, "FZF_DEFAULT_OPTS": ""},
+    )
+    if picker.returncode in (1, 130):
+        return None
+    picker.check_returncode()
+    return matches[int(picker.stdout.split("\t", 1)[0])]
+
+
+def open_selection(value, pane_id, herdr):
+    matches = matching_openers(value, load_openers())
+    if not matches:
+        open_target(value, pane_id, herdr)
+        return
+    chosen = choose_opener(value, matches)
+    if not chosen:
+        return
+    target = opener_target(*chosen)
+    if isinstance(target, str):
+        launch(target)
+    else:
+        subprocess.Popen(target, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL, start_new_session=True)
 
 
 def copy_to_clipboard(value):
@@ -124,7 +210,10 @@ def open_target(value, pane_id=None, herdr="herdr"):
         if not path.exists():
             sys.exit(f"herdr-snatch: file does not exist: {value}")
         target = str(path.resolve())
+    launch(target)
 
+
+def launch(target):
     opener = "open" if sys.platform == "darwin" else "xdg-open"
     if not shutil.which(opener):
         sys.exit(f"herdr-snatch: {opener} is required to open a selection")
@@ -213,7 +302,7 @@ def main(argv=None):
         if action == "ctrl-y":
             copy_to_clipboard(selected)
         elif action == "ctrl-o":
-            open_target(selected, pane_id, herdr)
+            open_selection(selected, pane_id, herdr)
         else:
             subprocess.run([herdr, "pane", "send-text", pane_id, selected], check=True, stdout=subprocess.DEVNULL)
 

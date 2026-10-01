@@ -78,6 +78,26 @@ The picker pulls text from Herdr with `pane read`, then extracts paths, URLs, he
 
 Insert sends the selected text literally to the original pane. It doesn't press Enter or add shell quotes. Copy passes the exact text to `wl-copy` (Wayland), `xclip` (X11), or `pbcopy` (macOS). Open uses `xdg-open` (Linux) or `open` (macOS); relative paths are resolved from the original pane's working directory and must exist. These commands run on the machine hosting the Herdr popup, which matters if you're using a remote session.
 
+## Openers
+
+`Ctrl-O` checks the selection against a list of openers before falling back to URLs and paths. Out of the box, `owner/repo#123` opens on GitHub. Add your own under `"openers"` in `settings.json`:
+
+```json
+{"openers": [
+  {"name": "Ticket", "priority": 100, "match": "(?:TICKET|ticket)[ -]#?(?P<number>\\d+)",
+   "url": "https://tickets.example.com/{number}"},
+  {"name": "Ticket (bare number)", "match": "#?(?P<number>\\d+)",
+   "command": ["open-ticket", "{number}"]}
+]}
+```
+
+- `match` is a Python regex that must match the whole selection. Its named groups fill `{placeholders}` in `url` or `command`, and `defaults` supplies values for groups that didn't match.
+- Each opener has exactly one of `url` (opened with `open` or `xdg-open`) or `command` (an argument list run as-is, without a shell).
+- When the highest `priority` belongs to one opener, it opens right away. When several openers tie for the top, a second picker asks which one to use, listing them in config order. `priority` defaults to 0.
+- An opener with the same `name` as a built-in replaces it.
+
+A word followed by a number, like `PR #123` or `task 42`, becomes a picker candidate when some opener matches it. Bare numbers are always candidates.
+
 ## Development
 
 Link a local checkout instead of installing from GitHub:

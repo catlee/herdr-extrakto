@@ -176,5 +176,72 @@ class SnatchTests(unittest.TestCase):
             self.assertIn("src/foo/parser.rs", listing.getvalue())
 
 
+OPENERS = [
+    {"name": "PR", "match": r"(?:PR #?|(?P<owner>[\w.-]+)/(?P<repo>[\w.-]+)#)(?P<number>\d+)", "priority": 100,
+     "defaults": {"owner": "acme", "repo": "app"},
+     "url": "https://code.example/repos/{owner}/{repo}/pulls/{number}"},
+    {"name": "Ticket", "match": r"(?:ticket[- ]|TK )(?P<number>\d+)", "priority": 100,
+     "url": "https://tickets.example/{number}"},
+    {"name": "Bare PR", "match": r"#?(?P<number>\d+)", "url": "https://code.example/pulls/{number}"},
+    {"name": "Bare ticket", "match": r"#?(?P<number>\d+)", "command": ["open-ticket", "{number}"]},
+]
+
+
+class OpenerTests(unittest.TestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.directory.cleanup)
+        (pathlib.Path(self.directory.name) / "settings.json").write_text(json.dumps({"openers": OPENERS}))
+        environment = patch.dict("os.environ", {"HERDR_PLUGIN_CONFIG_DIR": self.directory.name})
+        environment.start()
+        self.addCleanup(environment.stop)
+        self.openers = snatch.load_openers()
+
+    def test_prefixed_numbers_become_candidates_only_when_an_opener_matches(self):
+        values = list(snatch.candidates("see PR #4321 and TK 1628, timeout 120\n", self.openers))
+        self.assertIn("PR #4321", values)
+        self.assertIn("TK 1628", values)
+        self.assertNotIn("timeout 120", values)
+        self.assertIn("120", values)
+
+    def test_owner_repo_reference_fills_fields_and_defaults(self):
+        (opener, fields), = [m for m in snatch.matching_openers("octo/widgets#54557", self.openers)
+                            if m[0]["name"] == "PR"]
+        self.assertEqual(snatch.opener_target(opener, fields), "https://code.example/repos/octo/widgets/pulls/54557")
+        (opener, fields), = snatch.matching_openers("PR 7", self.openers)
+        self.assertEqual(snatch.opener_target(opener, fields), "https://code.example/repos/acme/app/pulls/7")
+
+    def test_highest_priority_opener_opens_without_asking(self):
+        with patch.object(snatch.subprocess, "run") as run, patch.object(snatch.subprocess, "Popen") as popen, \
+             patch.object(snatch.shutil, "which", return_value="/usr/bin/xdg-open"), \
+             patch.object(snatch.sys, "platform", "linux"):
+            snatch.open_selection("ticket-1628", "w2:p3", "herdr")
+        run.assert_not_called()
+        self.assertEqual(popen.call_args.args[0], ["xdg-open", "https://tickets.example/1628"])
+
+    def test_tied_openers_ask_and_run_the_chosen_command(self):
+        with patch.object(snatch.subprocess, "run") as run, patch.object(snatch.subprocess, "Popen") as popen:
+            run.return_value = subprocess.CompletedProcess([], 0, stdout="1\tBare ticket\topen-ticket 1628\n")
+            snatch.open_selection("#1628", "w2:p3", "herdr")
+        self.assertIn("0\tBare PR\thttps://code.example/pulls/1628", run.call_args.kwargs["input"])
+        self.assertEqual(popen.call_args.args[0], ["open-ticket", "1628"])
+
+    def test_cancelling_the_chooser_opens_nothing(self):
+        with patch.object(snatch.subprocess, "run") as run, patch.object(snatch.subprocess, "Popen") as popen:
+            run.return_value = subprocess.CompletedProcess([], 130, stdout="")
+            snatch.open_selection("1628", "w2:p3", "herdr")
+        popen.assert_not_called()
+
+    def test_unmatched_selection_falls_back_to_url_and_path_opening(self):
+        with patch.object(snatch, "open_target") as open_target:
+            snatch.open_selection("https://example.com/x", "w2:p3", "herdr")
+        open_target.assert_called_once_with("https://example.com/x", "w2:p3", "herdr")
+
+    def test_settings_override_builtin_opener_by_name(self):
+        settings = {"openers": [{"name": "GitHub", "match": "(?!)", "url": "x"}]}
+        (pathlib.Path(self.directory.name) / "settings.json").write_text(json.dumps(settings))
+        self.assertEqual(snatch.matching_openers("a/b#1", snatch.load_openers()), [])
+
+
 if __name__ == "__main__":
     unittest.main()
