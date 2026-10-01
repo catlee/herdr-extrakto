@@ -18,6 +18,12 @@ loader.exec_module(snatch)
 
 
 class SnatchTests(unittest.TestCase):
+    def setUp(self):
+        # Exercise the xdg-open path on every host; macOS would otherwise use `open`.
+        platform = patch.object(snatch.sys, "platform", "linux")
+        platform.start()
+        self.addCleanup(platform.stop)
+
     def test_plugin_config_sets_default_search(self):
         with tempfile.TemporaryDirectory() as directory:
             (pathlib.Path(directory) / "settings.json").write_text('{"scope": "workspace", "source": "scrollback"}')
@@ -103,7 +109,7 @@ class SnatchTests(unittest.TestCase):
                 ]
                 snatch.main(["--scope", "pane"])
             self.assertEqual(run.call_count, 2)
-            self.assertEqual(popen.call_args.args[0], ["xdg-open", str(path)])
+            self.assertEqual(popen.call_args.args[0], ["xdg-open", str(path.resolve())])
             self.assertTrue(popen.call_args.kwargs["start_new_session"])
 
     def test_plugin_open_resolves_path_from_originating_pane(self):
@@ -117,7 +123,7 @@ class SnatchTests(unittest.TestCase):
                  patch.object(snatch.subprocess, "Popen") as popen:
                 snatch.open_target(path.name, "w2:p3", "/bin/herdr")
             run.assert_called_once_with(["/bin/herdr", "pane", "get", "w2:p3"], check=True, capture_output=True, text=True)
-            self.assertEqual(popen.call_args.args[0], ["xdg-open", str(path)])
+            self.assertEqual(popen.call_args.args[0], ["xdg-open", str(path.resolve())])
 
     def test_open_url_as_one_argument(self):
         url = "https://example.com/issues/123?a=1&b=2"
